@@ -103,7 +103,51 @@ test('authenticates login and returns the profile from the bearer token', async 
 
   assert.equal(login.status, 200);
   assert.equal(profileResponse.status, 200);
-  assert.deepEqual(profile.user, { id: '1', email: 'person@example.com', name: 'Person', hasPin: false });
+  assert.deepEqual(profile.user, {
+    id: '1',
+    email: 'person@example.com',
+    name: 'Person',
+    hasPin: false,
+    demoPortfolioSpec: '',
+  });
+  assert.equal(unauthenticated.status, 401);
+});
+
+test('saves a demo portfolio rule for the signed-in account', async () => {
+  const login = await fetch(`${baseUrl}/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: 'person@example.com', password: 'a secure password' }),
+  });
+  const session = await login.json();
+
+  const invalid = await fetch(`${baseUrl}/demo-portfolio`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ spec: '40k,5mins' }),
+  });
+  assert.equal(invalid.status, 400);
+
+  const saved = await fetch(`${baseUrl}/demo-portfolio`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ spec: '40k,5mins,2%' }),
+  });
+  const body = await saved.json();
+  assert.equal(saved.status, 200);
+  assert.equal(body.user.demoPortfolioSpec, '40k,5mins,2%');
+
+  const profileResponse = await fetch(`${baseUrl}/me`, {
+    headers: { Authorization: `Bearer ${session.token}` },
+  });
+  const profile = await profileResponse.json();
+  assert.equal(profile.user.demoPortfolioSpec, '40k,5mins,2%');
+
+  const unauthenticated = await fetch(`${baseUrl}/demo-portfolio`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ spec: '40k,5mins,2%' }),
+  });
   assert.equal(unauthenticated.status, 401);
 });
 

@@ -31,6 +31,14 @@ const userSchema = new mongoose.Schema(
       select: false,
       default: null,
     },
+    // Demo portfolio spec (`<amount>,<interval>,<rate>`) chosen by the account
+    // owner. Empty means the built-in default is used.
+    demoPortfolioSpec: {
+      type: String,
+      trim: true,
+      maxlength: 40,
+      default: '',
+    },
   },
   { timestamps: true }
 );

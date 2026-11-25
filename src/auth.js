@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const express = require('express');
 const bcrypt = require('bcryptjs');
+const { parseDemoPortfolioSpec } = require('./demoPortfolio');
 
 const TOKEN_LIFETIME_SECONDS = 60 * 60;
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -55,6 +56,7 @@ const toProfile = (user) => ({
   email: user.email,
   name: user.name || '',
   hasPin: Boolean(user.pinHash),
+  demoPortfolioSpec: user.demoPortfolioSpec || '',
 });
 
 const asyncRoute = (handler) => (request, response, next) => {
@@ -160,6 +162,27 @@ const createAuthRouter = ({ User, jwtSecret, now = Date.now }) => {
 
     const user = await User.findById(payload.sub).select('+pinHash');
     if (!user) return response.status(401).json({ error: 'Authentication required.' });
+    return response.json({ user: toProfile(user) });
+  }));
+
+  // Stores the demo portfolio spec (`40k,5mins,2%`) on the account so the
+  // simulated balance follows the wallet owner across devices.
+  router.post('/demo-portfolio', asyncRoute(async (request, response) => {
+    const payload = verifyToken(readBearerToken(request), jwtSecret, now());
+    if (!payload) return response.status(401).json({ error: 'Authentication required.' });
+
+    const body = request.body;
+    const spec = body && typeof body.spec === 'string' ? body.spec.trim() : '';
+    if (!parseDemoPortfolioSpec(spec)) {
+      return response.status(400).json({
+        error: 'Use the format amount,interval,rate — for example 40k,5mins,2%.',
+      });
+    }
+
+    const user = await User.findById(payload.sub);
+    if (!user) return response.status(401).json({ error: 'Authentication required.' });
+    user.demoPortfolioSpec = spec;
+    await user.save();
     return response.json({ user: toProfile(user) });
   }));
 
