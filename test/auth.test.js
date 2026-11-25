@@ -7,9 +7,15 @@ const mongoose = require('mongoose');
 const UserSchemaModel = require('../src/models/User');
 
 const users = new Map();
+// Mimics a Mongoose query: thenable and chainable with `.select()`.
+const query = (user) => ({
+  select: () => Promise.resolve(user),
+  then: (resolve, reject) => Promise.resolve(user).then(resolve, reject),
+});
 const User = {
   async create(record) {
     const user = { _id: String(users.size + 1), ...record };
+    user.save = async () => user;
     users.set(user.email, user);
     return user;
   },
@@ -18,8 +24,8 @@ const User = {
       select: async () => users.get(email) || null,
     };
   },
-  async findById(id) {
-    return [...users.values()].find((user) => user._id === id) || null;
+  findById(id) {
+    return query([...users.values()].find((user) => user._id === id) || null);
   },
 };
 
@@ -97,6 +103,54 @@ test('authenticates login and returns the profile from the bearer token', async 
 
   assert.equal(login.status, 200);
   assert.equal(profileResponse.status, 200);
-  assert.deepEqual(profile.user, { id: '1', email: 'person@example.com', name: 'Person' });
+  assert.deepEqual(profile.user, { id: '1', email: 'person@example.com', name: 'Person', hasPin: false });
   assert.equal(unauthenticated.status, 401);
+});
+
+test('stores a six-digit code and signs in with it instead of the password', async () => {
+  const login = await fetch(`${baseUrl}/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: 'person@example.com', password: 'a secure password' }),
+  });
+  const session = await login.json();
+
+  const rejected = await fetch(`${baseUrl}/pin`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ pin: '12345' }),
+  });
+  assert.equal(rejected.status, 400);
+
+  const saved = await fetch(`${baseUrl}/pin`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ pin: '123456' }),
+  });
+  const savedBody = await saved.json();
+  assert.equal(saved.status, 200);
+  assert.equal(savedBody.user.hasPin, true);
+  assert.notEqual(users.get('person@example.com').pinHash, '123456');
+
+  const pinLogin = await fetch(`${baseUrl}/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: 'person@example.com', pin: '123456' }),
+  });
+  const pinSession = await pinLogin.json();
+  assert.equal(pinLogin.status, 200);
+  assert.equal(pinSession.user.hasPin, true);
+
+  const wrongPin = await fetch(`${baseUrl}/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: 'person@example.com', pin: '654321' }),
+  });
+  assert.equal(wrongPin.status, 401);
+
+  const profileResponse = await fetch(`${baseUrl}/me`, {
+    headers: { Authorization: `Bearer ${pinSession.token}` },
+  });
+  const profile = await profileResponse.json();
+  assert.equal(profile.user.hasPin, true);
 });

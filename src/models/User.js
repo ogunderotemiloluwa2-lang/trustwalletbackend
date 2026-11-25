@@ -24,6 +24,13 @@ const userSchema = new mongoose.Schema(
       required: true,
       select: false,
     },
+    // Six-digit code used to sign in after the wallet has been created. Stored
+    // as a bcrypt hash and never returned to the client.
+    pinHash: {
+      type: String,
+      select: false,
+      default: null,
+    },
   },
   { timestamps: true }
 );

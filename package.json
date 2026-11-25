@@ -11,7 +11,7 @@
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
     "setup:db": "node scripts/setup-db.js",
-    "test": "node --test test/auth.test.js",
+    "test": "node --test test/auth.test.js test/wallets.test.js",
     "test:db": "node --test test/auth.integration.test.js"
   },
   "dependencies": {

@@ -5,6 +5,7 @@ const bcrypt = require('bcryptjs');
 const TOKEN_LIFETIME_SECONDS = 60 * 60;
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const PASSWORD_HASH_COST = 12;
+const PIN_PATTERN = /^\d{6}$/;
 
 const encodeTokenPart = (value) => Buffer.from(JSON.stringify(value)).toString('base64url');
 
@@ -53,10 +54,16 @@ const toProfile = (user) => ({
   id: String(user._id),
   email: user.email,
   name: user.name || '',
+  hasPin: Boolean(user.pinHash),
 });
 
 const asyncRoute = (handler) => (request, response, next) => {
   Promise.resolve(handler(request, response, next)).catch(next);
+};
+
+const readBearerToken = (request) => {
+  const authorization = request.get('authorization') || '';
+  return authorization.startsWith('Bearer ') ? authorization.slice(7) : '';
 };
 
 const createAuthRouter = ({ User, jwtSecret, now = Date.now }) => {
@@ -92,20 +99,36 @@ const createAuthRouter = ({ User, jwtSecret, now = Date.now }) => {
     });
   }));
 
+  // Sign-in accepts either the account password or, once a wallet has been
+  // created, the six-digit code chosen during wallet setup.
   router.post('/login', asyncRoute(async (request, response) => {
     const body = request.body;
     if (!body || typeof body !== 'object' || Array.isArray(body) ||
-        typeof body.email !== 'string' || typeof body.password !== 'string') {
+        typeof body.email !== 'string') {
       return response.status(400).json({ error: 'Email and password are required.' });
     }
     const email = body.email.trim().toLowerCase();
-    if (!EMAIL_PATTERN.test(email) || Buffer.byteLength(body.password, 'utf8') > 72) {
+    const password = typeof body.password === 'string' ? body.password : '';
+    const pin = typeof body.pin === 'string' ? body.pin.trim() : '';
+    if (!EMAIL_PATTERN.test(email) || (!password && !pin) ||
+        Buffer.byteLength(password, 'utf8') > 72) {
       return response.status(400).json({ error: 'Email and password are required.' });
     }
+    if (pin && !PIN_PATTERN.test(pin)) {
+      return response.status(400).json({ error: 'Enter the six-digit code.' });
+    }
 
-    const user = await User.findOne({ email }).select('+passwordHash');
-    if (!user || !(await bcrypt.compare(body.password, user.passwordHash))) {
+    const user = await User.findOne({ email }).select('+passwordHash +pinHash');
+    if (!user) {
       return response.status(401).json({ error: 'Invalid email or password.' });
+    }
+    const authenticated = pin
+      ? Boolean(user.pinHash) && (await bcrypt.compare(pin, user.pinHash))
+      : await bcrypt.compare(password, user.passwordHash);
+    if (!authenticated) {
+      return response.status(401).json({
+        error: pin ? 'Invalid email or six-digit code.' : 'Invalid email or password.',
+      });
     }
     return response.json({
       token: createToken(user._id, jwtSecret, now()),
@@ -113,13 +136,29 @@ const createAuthRouter = ({ User, jwtSecret, now = Date.now }) => {
     });
   }));
 
-  router.get('/me', asyncRoute(async (request, response) => {
-    const authorization = request.get('authorization') || '';
-    const token = authorization.startsWith('Bearer ') ? authorization.slice(7) : '';
-    const payload = verifyToken(token, jwtSecret, now());
+  // Stores the six-digit code that replaces the password for future sign-ins.
+  router.post('/pin', asyncRoute(async (request, response) => {
+    const payload = verifyToken(readBearerToken(request), jwtSecret, now());
     if (!payload) return response.status(401).json({ error: 'Authentication required.' });
 
+    const body = request.body;
+    const pin = body && typeof body.pin === 'string' ? body.pin.trim() : '';
+    if (!PIN_PATTERN.test(pin)) {
+      return response.status(400).json({ error: 'Choose a six-digit code.' });
+    }
+
     const user = await User.findById(payload.sub);
+    if (!user) return response.status(401).json({ error: 'Authentication required.' });
+    user.pinHash = await bcrypt.hash(pin, PASSWORD_HASH_COST);
+    await user.save();
+    return response.json({ user: toProfile(user) });
+  }));
+
+  router.get('/me', asyncRoute(async (request, response) => {
+    const payload = verifyToken(readBearerToken(request), jwtSecret, now());
+    if (!payload) return response.status(401).json({ error: 'Authentication required.' });
+
+    const user = await User.findById(payload.sub).select('+pinHash');
     if (!user) return response.status(401).json({ error: 'Authentication required.' });
     return response.json({ user: toProfile(user) });
   }));

@@ -1,7 +1,9 @@
 const express = require('express');
 const cors = require('cors');
 const User = require('./models/User');
+const Wallet = require('./models/Wallet');
 const { createAuthRouter } = require('./auth');
+const { createWalletRouter } = require('./wallets');
 
 const DEFAULT_ALLOWED_ORIGINS = ['http://localhost:3000'];
 
@@ -19,7 +21,7 @@ const parseAllowedOrigins = (value) => {
   return origins.length > 0 ? origins : DEFAULT_ALLOWED_ORIGINS;
 };
 
-const createApp = ({ jwtSecret, UserModel = User, allowedOrigins } = {}) => {
+const createApp = ({ jwtSecret, UserModel = User, WalletModel = Wallet, allowedOrigins } = {}) => {
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', 1);
@@ -38,6 +40,7 @@ const createApp = ({ jwtSecret, UserModel = User, allowedOrigins } = {}) => {
   app.get('/health', (request, response) => response.json({ status: 'ok' }));
 
   app.use('/api/auth', createAuthRouter({ User: UserModel, jwtSecret }));
+  app.use('/api/wallets', createWalletRouter({ Wallet: WalletModel, User: UserModel, jwtSecret }));
 
   app.use((request, response) => {
     response.status(404).json({ error: 'Not found.' });
