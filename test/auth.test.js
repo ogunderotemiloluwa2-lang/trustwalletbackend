@@ -16,16 +16,20 @@ const User = {
   async create(record) {
     const user = { _id: String(users.size + 1), ...record };
     user.save = async () => user;
-    users.set(user.email, user);
+    users.set(user._id, user);
     return user;
   },
-  findOne({ email }) {
+  findOne(filter) {
+    const match = [...users.values()].find((user) =>
+      (filter.passwordLookup !== undefined && user.passwordLookup === filter.passwordLookup) ||
+      (filter.pinLookup !== undefined && user.pinLookup === filter.pinLookup)
+    ) || null;
     return {
-      select: async () => users.get(email) || null,
+      select: async () => match,
     };
   },
   findById(id) {
-    return query([...users.values()].find((user) => user._id === id) || null);
+    return query(users.get(id) || null);
   },
 };
 
@@ -48,8 +52,11 @@ after(async () => {
 test('enables Mongoose filter sanitization and validates user schema fields', async () => {
   assert.equal(mongoose.get('sanitizeFilter'), true);
   assert.equal(UserSchemaModel.schema.path('passwordHash').options.select, false);
+  assert.equal(UserSchemaModel.schema.path('passwordLookup').options.select, false);
+  assert.equal(UserSchemaModel.schema.path('pinHash').options.select, false);
+  assert.equal(UserSchemaModel.schema.path('email'), undefined);
   await assert.rejects(
-    new UserSchemaModel({ email: 'not-an-email', passwordHash: 'hash' }).validate(),
+    new UserSchemaModel({ passwordHash: 'hash' }).validate(),
     { name: 'ValidationError' }
   );
 });
@@ -58,17 +65,18 @@ test('registers a user with a password hash and returns a profile without the ha
   const response = await fetch(`${baseUrl}/register`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email: 'PERSON@example.com', password: 'a secure password', name: 'Person' }),
+    body: JSON.stringify({ password: 'a secure password', name: 'Person' }),
   });
   const data = await response.json();
-  const savedUser = users.get('person@example.com');
+  const savedUser = users.get('1');
 
   assert.equal(response.status, 201);
-  assert.equal(data.user.email, 'person@example.com');
   assert.equal(data.user.name, 'Person');
+  assert.equal(Object.hasOwn(data.user, 'email'), false);
   assert.equal(Object.hasOwn(data.user, 'passwordHash'), false);
   assert.notEqual(savedUser.passwordHash, 'a secure password');
   assert.equal(await bcrypt.compare('a secure password', savedUser.passwordHash), true);
+  assert.equal(typeof savedUser.passwordLookup, 'string');
   assert.equal(typeof data.token, 'string');
 });
 
@@ -76,12 +84,12 @@ test('rejects invalid registration input and invalid login credentials', async (
   const invalidRegistration = await fetch(`${baseUrl}/register`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email: 'bad', password: 'short' }),
+    body: JSON.stringify({ password: 'short' }),
   });
   const invalidLogin = await fetch(`${baseUrl}/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email: 'person@example.com', password: 'incorrect password' }),
+    body: JSON.stringify({ password: 'incorrect password' }),
   });
 
   assert.equal(invalidRegistration.status, 400);
@@ -92,7 +100,7 @@ test('authenticates login and returns the profile from the bearer token', async 
   const login = await fetch(`${baseUrl}/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email: 'person@example.com', password: 'a secure password' }),
+    body: JSON.stringify({ password: 'a secure password' }),
   });
   const session = await login.json();
   const profileResponse = await fetch(`${baseUrl}/me`, {
@@ -105,48 +113,56 @@ test('authenticates login and returns the profile from the bearer token', async 
   assert.equal(profileResponse.status, 200);
   assert.deepEqual(profile.user, {
     id: '1',
-    email: 'person@example.com',
     name: 'Person',
     hasPin: false,
-    demoPortfolioSpec: '',
+    balance: 0,
   });
   assert.equal(unauthenticated.status, 401);
 });
 
-test('saves a demo portfolio rule for the signed-in account', async () => {
+test('stores the headline balance on the account so it survives signing out', async () => {
   const login = await fetch(`${baseUrl}/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email: 'person@example.com', password: 'a secure password' }),
+    body: JSON.stringify({ password: 'a secure password' }),
   });
   const session = await login.json();
 
-  const invalid = await fetch(`${baseUrl}/demo-portfolio`, {
+  const invalid = await fetch(`${baseUrl}/balance`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.token}` },
-    body: JSON.stringify({ spec: '40k,5mins' }),
+    body: JSON.stringify({ balance: -1 }),
   });
   assert.equal(invalid.status, 400);
 
-  const saved = await fetch(`${baseUrl}/demo-portfolio`, {
+  const saved = await fetch(`${baseUrl}/balance`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.token}` },
-    body: JSON.stringify({ spec: '40k,5mins,2%' }),
+    body: JSON.stringify({ balance: 250 }),
   });
   const body = await saved.json();
   assert.equal(saved.status, 200);
-  assert.equal(body.user.demoPortfolioSpec, '40k,5mins,2%');
+  assert.equal(body.user.balance, 250);
 
-  const profileResponse = await fetch(`${baseUrl}/me`, {
-    headers: { Authorization: `Bearer ${session.token}` },
-  });
-  const profile = await profileResponse.json();
-  assert.equal(profile.user.demoPortfolioSpec, '40k,5mins,2%');
-
-  const unauthenticated = await fetch(`${baseUrl}/demo-portfolio`, {
+  // A fresh sign-in must read the stored amount back rather than resetting it.
+  const secondLogin = await fetch(`${baseUrl}/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ spec: '40k,5mins,2%' }),
+    body: JSON.stringify({ password: 'a secure password' }),
+  });
+  const secondSession = await secondLogin.json();
+  assert.equal(secondSession.user.balance, 250);
+
+  const profileResponse = await fetch(`${baseUrl}/me`, {
+    headers: { Authorization: `Bearer ${secondSession.token}` },
+  });
+  const profile = await profileResponse.json();
+  assert.equal(profile.user.balance, 250);
+
+  const unauthenticated = await fetch(`${baseUrl}/balance`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ balance: 250 }),
   });
   assert.equal(unauthenticated.status, 401);
 });
@@ -155,7 +171,7 @@ test('stores a six-digit code and signs in with it instead of the password', asy
   const login = await fetch(`${baseUrl}/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email: 'person@example.com', password: 'a secure password' }),
+    body: JSON.stringify({ password: 'a secure password' }),
   });
   const session = await login.json();
 
@@ -174,12 +190,12 @@ test('stores a six-digit code and signs in with it instead of the password', asy
   const savedBody = await saved.json();
   assert.equal(saved.status, 200);
   assert.equal(savedBody.user.hasPin, true);
-  assert.notEqual(users.get('person@example.com').pinHash, '123456');
+  assert.notEqual(users.get('1').pinHash, '123456');
 
   const pinLogin = await fetch(`${baseUrl}/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email: 'person@example.com', pin: '123456' }),
+    body: JSON.stringify({ pin: '123456' }),
   });
   const pinSession = await pinLogin.json();
   assert.equal(pinLogin.status, 200);
@@ -188,7 +204,7 @@ test('stores a six-digit code and signs in with it instead of the password', asy
   const wrongPin = await fetch(`${baseUrl}/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email: 'person@example.com', pin: '654321' }),
+    body: JSON.stringify({ pin: '654321' }),
   });
   assert.equal(wrongPin.status, 401);
 

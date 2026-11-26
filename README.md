@@ -3,10 +3,11 @@
 Authentication API for the Trust Wallet Web front end. Express 5 + Mongoose,
 deployed on Render.
 
-The API stores an email, a display name, a bcrypt password hash, an optional
-bcrypt hash of the six-digit sign-in code, and the wallet metadata (addresses
-and labels) created during onboarding. Wallet keys are derived and encrypted in
-the browser and never reach this service.
+The API stores a display name, a bcrypt password hash, an optional bcrypt hash
+of the six-digit sign-in code, and the wallet metadata (addresses and labels)
+created during onboarding. There is no email address: an account is identified
+by the credential the owner signs in with. Wallet keys are derived and encrypted
+in the browser and never reach this service.
 
 ## Endpoints
 
@@ -17,17 +18,24 @@ the browser and never reach this service.
 | `POST` | `/api/auth/login` | – | Exchange the password **or** the six-digit code for a profile + JWT |
 | `POST` | `/api/auth/pin` | Bearer | Store the six-digit sign-in code for the session account |
 | `GET` | `/api/auth/me` | Bearer | Return the profile for the session token |
+| `POST` | `/api/auth/balance` | `Bearer` | Store the headline balance on the account |
 | `POST` | `/api/wallets` | Bearer | Upsert the wallet record for the session account |
 | `GET` | `/api/wallets` | Bearer | List the wallets owned by the session account |
 
 Session tokens are HMAC-SHA256 JWTs valid for one hour.
 
-`POST /api/auth/login` accepts `{ "email", "password" }` or `{ "email", "pin" }`.
-Once a wallet has been created the front end sends the six-digit code, so the
-account password is only needed before the first wallet exists.
+`POST /api/auth/login` accepts `{ "pin" }` or `{ "password" }`. The six-digit code
+is the normal sign-in; the wallet password is the fallback when the code is
+forgotten. Because there is no email address, the account is located with a
+keyed digest of the submitted credential (`passwordLookup` / `pinLookup`) and
+then verified against the bcrypt hash, so a database dump alone cannot be used
+to enumerate accounts.
 
 The profile returned by every auth route includes `hasPin`, which tells the front
-end whether the account already has a six-digit code.
+end whether the account already has a six-digit code, and `balance`, the headline
+USD amount owned by the account. The balance lives on the user document, so it is
+identical on every device and is never reset by signing out or by removing a
+wallet from a device. It stays at `0` until an amount is set.
 
 ## Local development
 

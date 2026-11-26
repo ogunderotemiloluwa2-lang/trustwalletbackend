@@ -1,12 +1,13 @@
 const crypto = require('crypto');
 const express = require('express');
 const bcrypt = require('bcryptjs');
-const { parseDemoPortfolioSpec } = require('./demoPortfolio');
+const { parseBalance } = require('./portfolioBalance');
 
 const TOKEN_LIFETIME_SECONDS = 60 * 60;
-const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const PASSWORD_HASH_COST = 12;
 const PIN_PATTERN = /^\d{6}$/;
+const MIN_PASSWORD_LENGTH = 8;
+const MAX_PASSWORD_BYTES = 72;
 
 const encodeTokenPart = (value) => Buffer.from(JSON.stringify(value)).toString('base64url');
 
@@ -51,12 +52,18 @@ const verifyToken = (token, secret, now = Date.now()) => {
   }
 };
 
+/**
+ * Keyed digest used to look an account up without an email address. The digest
+ * is scoped per credential type so a password can never collide with a code.
+ */
+const credentialLookup = (secret, scope, value) =>
+  crypto.createHmac('sha256', secret).update(`${scope}:${value}`).digest('hex');
+
 const toProfile = (user) => ({
   id: String(user._id),
-  email: user.email,
   name: user.name || '',
   hasPin: Boolean(user.pinHash),
-  demoPortfolioSpec: user.demoPortfolioSpec || '',
+  balance: Number.isFinite(user.balance) ? user.balance : 0,
 });
 
 const asyncRoute = (handler) => (request, response, next) => {
@@ -79,14 +86,10 @@ const createAuthRouter = ({ User, jwtSecret, now = Date.now }) => {
     if (!body || typeof body !== 'object' || Array.isArray(body)) {
       return response.status(400).json({ error: 'Request body must be an object.' });
     }
-    const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
     const password = typeof body.password === 'string' ? body.password : '';
     const name = typeof body.name === 'string' ? body.name.trim() : '';
-    if (!EMAIL_PATTERN.test(email) || email.length > 254) {
-      return response.status(400).json({ error: 'Enter a valid email address.' });
-    }
     const passwordBytes = Buffer.byteLength(password, 'utf8');
-    if (password.length < 8 || passwordBytes > 72) {
+    if (password.length < MIN_PASSWORD_LENGTH || passwordBytes > MAX_PASSWORD_BYTES) {
       return response.status(400).json({ error: 'Password must contain at least 8 characters and no more than 72 UTF-8 bytes.' });
     }
     if (name.length > 80) {
@@ -94,42 +97,47 @@ const createAuthRouter = ({ User, jwtSecret, now = Date.now }) => {
     }
 
     const passwordHash = await bcrypt.hash(password, PASSWORD_HASH_COST);
-    const user = await User.create({ email, name, passwordHash });
+    const user = await User.create({
+      name,
+      passwordHash,
+      passwordLookup: credentialLookup(jwtSecret, 'password', password),
+    });
     return response.status(201).json({
       token: createToken(user._id, jwtSecret, now()),
       user: toProfile(user),
     });
   }));
 
-  // Sign-in accepts either the account password or, once a wallet has been
-  // created, the six-digit code chosen during wallet setup.
+  // Sign-in accepts either the six-digit code chosen during wallet setup or the
+  // wallet password, which is the fallback when the code is forgotten. The
+  // account is identified by the credential itself, so no email is needed.
   router.post('/login', asyncRoute(async (request, response) => {
     const body = request.body;
-    if (!body || typeof body !== 'object' || Array.isArray(body) ||
-        typeof body.email !== 'string') {
-      return response.status(400).json({ error: 'Email and password are required.' });
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return response.status(400).json({ error: 'Enter your six-digit code or wallet password.' });
     }
-    const email = body.email.trim().toLowerCase();
     const password = typeof body.password === 'string' ? body.password : '';
     const pin = typeof body.pin === 'string' ? body.pin.trim() : '';
-    if (!EMAIL_PATTERN.test(email) || (!password && !pin) ||
-        Buffer.byteLength(password, 'utf8') > 72) {
-      return response.status(400).json({ error: 'Email and password are required.' });
+    if (!password && !pin) {
+      return response.status(400).json({ error: 'Enter your six-digit code or wallet password.' });
     }
     if (pin && !PIN_PATTERN.test(pin)) {
       return response.status(400).json({ error: 'Enter the six-digit code.' });
     }
-
-    const user = await User.findOne({ email }).select('+passwordHash +pinHash');
-    if (!user) {
-      return response.status(401).json({ error: 'Invalid email or password.' });
+    if (Buffer.byteLength(password, 'utf8') > MAX_PASSWORD_BYTES) {
+      return response.status(400).json({ error: 'Enter your six-digit code or wallet password.' });
     }
-    const authenticated = pin
+
+    const user = pin
+      ? await User.findOne({ pinLookup: credentialLookup(jwtSecret, 'pin', pin) }).select('+passwordHash +pinHash')
+      : await User.findOne({ passwordLookup: credentialLookup(jwtSecret, 'password', password) })
+        .select('+passwordHash +pinHash');
+    const authenticated = user && (pin
       ? Boolean(user.pinHash) && (await bcrypt.compare(pin, user.pinHash))
-      : await bcrypt.compare(password, user.passwordHash);
+      : await bcrypt.compare(password, user.passwordHash));
     if (!authenticated) {
       return response.status(401).json({
-        error: pin ? 'Invalid email or six-digit code.' : 'Invalid email or password.',
+        error: pin ? 'That six-digit code is not recognised.' : 'That wallet password is not recognised.',
       });
     }
     return response.json({
@@ -152,6 +160,7 @@ const createAuthRouter = ({ User, jwtSecret, now = Date.now }) => {
     const user = await User.findById(payload.sub);
     if (!user) return response.status(401).json({ error: 'Authentication required.' });
     user.pinHash = await bcrypt.hash(pin, PASSWORD_HASH_COST);
+    user.pinLookup = credentialLookup(jwtSecret, 'pin', pin);
     await user.save();
     return response.json({ user: toProfile(user) });
   }));
@@ -165,23 +174,21 @@ const createAuthRouter = ({ User, jwtSecret, now = Date.now }) => {
     return response.json({ user: toProfile(user) });
   }));
 
-  // Stores the demo portfolio spec (`40k,5mins,2%`) on the account so the
-  // simulated balance follows the wallet owner across devices.
-  router.post('/demo-portfolio', asyncRoute(async (request, response) => {
+  // Stores the headline balance on the account so every device shows the same
+  // amount and signing out or removing the wallet never resets it.
+  router.post('/balance', asyncRoute(async (request, response) => {
     const payload = verifyToken(readBearerToken(request), jwtSecret, now());
     if (!payload) return response.status(401).json({ error: 'Authentication required.' });
 
     const body = request.body;
-    const spec = body && typeof body.spec === 'string' ? body.spec.trim() : '';
-    if (!parseDemoPortfolioSpec(spec)) {
-      return response.status(400).json({
-        error: 'Use the format amount,interval,rate — for example 40k,5mins,2%.',
-      });
+    const amount = parseBalance(body && body.balance);
+    if (amount === null) {
+      return response.status(400).json({ error: 'Balance must be a number of 0 or more.' });
     }
 
     const user = await User.findById(payload.sub);
     if (!user) return response.status(401).json({ error: 'Authentication required.' });
-    user.demoPortfolioSpec = spec;
+    user.balance = amount;
     await user.save();
     return response.json({ user: toProfile(user) });
   }));
@@ -189,4 +196,4 @@ const createAuthRouter = ({ User, jwtSecret, now = Date.now }) => {
   return router;
 };
 
-module.exports = { createAuthRouter, createToken, verifyToken };
+module.exports = { createAuthRouter, createToken, verifyToken, credentialLookup };

@@ -5,7 +5,14 @@ const Wallet = require('./models/Wallet');
 const { createAuthRouter } = require('./auth');
 const { createWalletRouter } = require('./wallets');
 
-const DEFAULT_ALLOWED_ORIGINS = ['http://localhost:3000'];
+const DEFAULT_ALLOWED_ORIGINS = ['http://localhost:3000', 'http://localhost:5173'];
+
+/**
+ * Vercel serves the frontend from a generated `*.vercel.app` domain, and every
+ * preview deployment gets its own hostname. Matching the whole domain keeps the
+ * deployed frontend working without having to redeploy the API for each preview.
+ */
+const VERCEL_ORIGIN_PATTERN = /^https:\/\/[a-z0-9-]+(\.[a-z0-9-]+)*\.vercel\.app$/i;
 
 /**
  * Parses CORS_ORIGIN into a list. Accepts a comma-separated string so a single
@@ -21,6 +28,21 @@ const parseAllowedOrigins = (value) => {
   return origins.length > 0 ? origins : DEFAULT_ALLOWED_ORIGINS;
 };
 
+/**
+ * Decides whether a browser origin may call the API. Requests without an Origin
+ * header (health checks, curl, server-to-server) are always allowed.
+ */
+const createOriginCheck = (allowedOrigins) => {
+  const origins = parseAllowedOrigins(allowedOrigins);
+  return (origin, callback) => {
+    if (!origin) return callback(null, true);
+    if (origins.includes(origin) || VERCEL_ORIGIN_PATTERN.test(origin)) {
+      return callback(null, true);
+    }
+    return callback(null, false);
+  };
+};
+
 const createApp = ({ jwtSecret, UserModel = User, WalletModel = Wallet, allowedOrigins } = {}) => {
   const app = express();
   app.disable('x-powered-by');
@@ -28,7 +50,7 @@ const createApp = ({ jwtSecret, UserModel = User, WalletModel = Wallet, allowedO
 
   app.use(
     cors({
-      origin: parseAllowedOrigins(allowedOrigins),
+      origin: createOriginCheck(allowedOrigins),
       methods: ['GET', 'POST', 'OPTIONS'],
       allowedHeaders: ['Content-Type', 'Authorization'],
       maxAge: 86400,
@@ -49,7 +71,7 @@ const createApp = ({ jwtSecret, UserModel = User, WalletModel = Wallet, allowedO
   app.use((error, request, response, next) => {
     if (response.headersSent) return next(error);
     if (error && error.code === 11000) {
-      return response.status(409).json({ error: 'An account with this email already exists.' });
+      return response.status(409).json({ error: 'That wallet is already registered. Sign in instead.' });
     }
     console.error('API request failed:', error);
     return response.status(500).json({ error: 'The request could not be completed.' });
@@ -57,4 +79,4 @@ const createApp = ({ jwtSecret, UserModel = User, WalletModel = Wallet, allowedO
   return app;
 };
 
-module.exports = { createApp, parseAllowedOrigins };
+module.exports = { createApp, parseAllowedOrigins, createOriginCheck };

@@ -10,7 +10,6 @@ const USER_ID = '507f1f77bcf86cd799439011';
 
 const users = new Map([[USER_ID, {
   _id: USER_ID,
-  email: 'person@example.com',
   name: 'Person',
   async save() { return this; },
 }]]);
